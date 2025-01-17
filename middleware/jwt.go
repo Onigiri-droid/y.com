@@ -38,3 +38,4 @@ func JWTMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
         return next(c)
     }
 }
+
