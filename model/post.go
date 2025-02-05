@@ -34,8 +34,8 @@ type Tag struct {
 
 // Связь постов и тегов
 type PostTag struct {
-    PostID int `json:"post_id" bun:",pk,notnull"`
-    TagID  int `json:"tag_id" bun:",pk,notnull,column:tag"`
+    PostID int `bun:"post_id"`
+    TagID  int `bun:"tag_id"`
 }
 
 

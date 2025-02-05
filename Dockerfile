@@ -11,7 +11,7 @@ RUN go build -o main .
 
 # Минимальный образ для запуска
 FROM debian:latest
-RUN apt-get update && apt-get install -y netcat-openbsd
+RUN apt-get update && apt-get install -y netcat-openbsd curl
 WORKDIR /app
 COPY --from=builder /app/main .
 COPY wait-for-it.sh /app/wait-for-it.sh
@@ -24,4 +24,3 @@ EXPOSE 8080
 
 # Команда для запуска приложения
 CMD ["./wait-for-it.sh", "postgres-db", "5432", "--", "./main"]
-

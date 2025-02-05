@@ -9,7 +9,7 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 )
 
-// RunMigrations выполняет создание всех необходимых таблиц и триггеров
+// RunMigrations выполняет создание и обновление всех необходимых таблиц
 func RunMigrations(db *bun.DB) {
 	// Включение отладки SQL-запросов
 	db.AddQueryHook(bundebug.NewQueryHook(bundebug.WithVerbose(true)))
@@ -26,6 +26,20 @@ func RunMigrations(db *bun.DB) {
 		log.Fatalf("Ошибка создания таблицы пользователей: %v", err)
 	}
 	log.Println("Таблица пользователей создана.")
+
+	// Обновляем таблицу пользователей: добавляем недостающие столбцы
+	if _, err := db.ExecContext(ctx, `
+		ALTER TABLE users
+		ADD COLUMN IF NOT EXISTS avatar VARCHAR(255),
+		ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'offline',
+		ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP,
+		ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'user',
+		ADD COLUMN IF NOT EXISTS bio TEXT;
+	`); err != nil {
+		log.Fatalf("Ошибка обновления таблицы пользователей: %v", err)
+	}
+	log.Println("Обновлена таблица пользователей: добавлены avatar, status, created_at, last_seen, role, bio.")
 
 	// Создаем таблицу постов
 	if _, err := db.NewCreateTable().
@@ -46,6 +60,21 @@ func RunMigrations(db *bun.DB) {
 		log.Fatalf("Ошибка обновления таблицы постов: %v", err)
 	}
 	log.Println("Обновлена таблица постов: добавлены likes_count, comments_count, reposts_count.")
+
+	// Обновляем внешний ключ для каскадного удаления постов
+	if _, err := db.ExecContext(ctx, `
+    -- Удаляем записи из posts, где user_id ссылается на несуществующих пользователей
+    DELETE FROM posts
+    WHERE user_id NOT IN (SELECT id FROM users);
+    
+    -- Обновляем внешний ключ с каскадным удалением
+    ALTER TABLE posts
+    DROP CONSTRAINT IF EXISTS posts_user_id_fkey,
+    ADD CONSTRAINT posts_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+	`); err != nil {
+    log.Fatalf("Ошибка обновления внешнего ключа для каскадного удаления: %v", err)
+	}
+	log.Println("Внешний ключ таблицы posts обновлен для каскадного удаления.")
 
 	// Создаем таблицу тегов
 	if _, err := db.NewCreateTable().
