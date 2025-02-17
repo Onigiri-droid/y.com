@@ -15,18 +15,6 @@ type User struct {
     Role      string    `bun:"role"`
     Bio       string    `bun:"bio"`
 }
-// type User struct {
-// 	ID        int       `json:"id" bson:"_id,omitempty" bun:",pk,autoincrement"`
-// 	Name      string    `json:"name,omitempty" bson:"name,omitempty"`
-// 	Email     string    `json:"email,omitempty" bson:"email,omitempty"`
-// 	Password  string    `json:"password,omitempty" bson:"password,omitempty"`
-// 	Avatar    string    `json:"avatar,omitempty" bson:"avatar,omitempty"`
-// 	Status    string    `json:"status,omitempty" bson:"status,omitempty"`
-// 	CreatedAt time.Time `json:"createdAt,omitempty" bson:"createdAt,omitempty"`
-// 	LastSeen  time.Time `json:"lastSeen,omitempty" bson:"lastSeen,omitempty"`
-// 	Role      string    `json:"role,omitempty" bson:"role,omitempty"`
-// 	Bio       string    `json:"bio,omitempty" bson:"bio,omitempty"`
-// }
 
 // Структура для запроса на создание пользователя
 type CreateUserRequest struct {

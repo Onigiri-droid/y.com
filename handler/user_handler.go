@@ -4,6 +4,8 @@ import (
 	"api-service/model"
 	"api-service/utils"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -94,76 +96,157 @@ func (h *UserHandler) UpdateUser(c echo.Context) error {
 
 // Удаление пользователя
 func (h *UserHandler) DeleteUser(c echo.Context) error {
-    userID, ok := c.Get("user_id").(int)
-    if !ok {
-        return c.JSON(http.StatusUnauthorized, map[string]string{"error": "Не удалось получить ID пользователя"})
-    }
+	// Получаем ID текущего пользователя из контекста
+	userID, ok := c.Get("user_id").(int)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "Не удалось получить ID пользователя"})
+	}
 
-    ctx := c.Request().Context()
+	ctx := c.Request().Context()
 
-    // Начинаем транзакцию
-    tx, err := h.DB.BeginTx(ctx, nil)
-    if err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка начала транзакции"})
-    }
-    defer tx.Rollback()
+	// Начинаем транзакцию
+	tx, err := h.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка начала транзакции"})
+	}
+	// Если транзакция не зафиксируется, откатываем изменения
+	defer func() {
+		if p := recover(); p != nil {
+			tx.Rollback()
+			panic(p)
+		} else if err != nil {
+			tx.Rollback()
+		}
+	}()
 
-    // Таблицы, связанные с пользователем
-    tables := []struct {
-        model interface{}
-        where string
-    }{
-        {(*model.PostLike)(nil), "user_id = ?"},
-        {(*model.Comment)(nil), "user_id = ?"},
-        {(*model.Repost)(nil), "user_id = ?"},
-    }
+	// Шаг 1. Агрегируем данные для обновления счетчиков (до удаления записей)
+	type countResult struct {
+		PostID int `bun:"post_id"`
+		Count  int `bun:"cnt"`
+	}
 
-    // Удаляем данные из связанных таблиц
-    for _, table := range tables {
-        if _, err := tx.NewDelete().Model(table.model).Where(table.where, userID).Exec(ctx); err != nil {
-            return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Ошибка удаления из таблицы %T", table.model)})
-        }
-    }
+	var likeUpdates []countResult
+	err = tx.NewSelect().ColumnExpr("post_id, COUNT(*) AS cnt").
+		Model((*model.PostLike)(nil)).
+		Where("user_id = ?", userID).
+		Group("post_id").
+		Scan(ctx, &likeUpdates)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка выборки лайков"})
+	}
 
-    // Удаляем посты пользователя и связанные данные
-    var postIDs []int
-    if err := tx.NewSelect().Column("id").Model((*model.Post)(nil)).Where("user_id = ?", userID).Scan(ctx, &postIDs); err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка получения постов пользователя"})
-    }
+	var repostUpdates []countResult
+	err = tx.NewSelect().ColumnExpr("original_post_id AS post_id, COUNT(*) AS cnt").
+		Model((*model.Repost)(nil)).
+		Where("user_id = ?", userID).
+		Group("original_post_id").
+		Scan(ctx, &repostUpdates)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка выборки репостов"})
+	}
 
-    if len(postIDs) > 0 {
-        relatedTables := []struct {
-            model interface{}
-            where string
-        }{
-            {(*model.PostLike)(nil), "post_id IN (?)"},
-            {(*model.Comment)(nil), "post_id IN (?)"},
-            {(*model.Repost)(nil), "original_post_id IN (?)"},
-            {(*model.PostTag)(nil), "post_id IN (?)"},
-            {(*model.Media)(nil), "post_id IN (?)"},
-        }
+	var commentUpdates []countResult
+	err = tx.NewSelect().ColumnExpr("post_id, COUNT(*) AS cnt").
+		Model((*model.Comment)(nil)).
+		Where("user_id = ?", userID).
+		Group("post_id").
+		Scan(ctx, &commentUpdates)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка выборки комментариев"})
+	}
 
-        for _, table := range relatedTables {
-            if _, err := tx.NewDelete().Model(table.model).Where(table.where, bun.In(postIDs)).Exec(ctx); err != nil {
-                return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Ошибка удаления из таблицы %T", table.model)})
-            }
-        }
+	// Шаг 2. Обновляем счетчики в постах с учетом найденных данных
+	for _, upd := range likeUpdates {
+		_, err = tx.NewUpdate().Model((*model.Post)(nil)).
+			Set("likes_count = GREATEST(likes_count - ?, 0)", upd.Count).
+			Where("id = ?", upd.PostID).
+			Exec(ctx)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка обновления счетчика лайков"})
+		}
+	}
 
-        // Удаляем посты пользователя
-        if _, err := tx.NewDelete().Model((*model.Post)(nil)).Where("user_id = ?", userID).Exec(ctx); err != nil {
-            return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка удаления постов пользователя"})
-        }
-    }
+	for _, upd := range repostUpdates {
+		_, err = tx.NewUpdate().Model((*model.Post)(nil)).
+			Set("reposts_count = GREATEST(reposts_count - ?, 0)", upd.Count).
+			Where("id = ?", upd.PostID).
+			Exec(ctx)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка обновления счетчика репостов"})
+		}
+	}
 
-    // Удаляем самого пользователя
-    if _, err := tx.NewDelete().Model((*model.User)(nil)).Where("id = ?", userID).Exec(ctx); err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка удаления пользователя"})
-    }
+	for _, upd := range commentUpdates {
+		_, err = tx.NewUpdate().Model((*model.Post)(nil)).
+			Set("comments_count = GREATEST(comments_count - ?, 0)", upd.Count).
+			Where("id = ?", upd.PostID).
+			Exec(ctx)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка обновления счетчика комментариев"})
+		}
+	}
 
-    // Фиксируем транзакцию
-    if err := tx.Commit(); err != nil {
-        return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка фиксации транзакции"})
-    }
+	// Шаг 3. Удаляем записи из связанных таблиц, где пользователь является автором
+	associatedTables := []struct {
+		model interface{}
+		query string
+	}{
+		{&model.PostLike{}, "user_id = ?"},
+		{&model.Comment{}, "user_id = ?"},
+		{&model.Repost{}, "user_id = ?"},
+	}
+	for _, table := range associatedTables {
+		if _, err = tx.NewDelete().Model(table.model).Where(table.query, userID).Exec(ctx); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": fmt.Sprintf("Ошибка удаления данных из таблицы %T: %v", table.model, err),
+			})
+		}
+	}
 
-    return c.NoContent(http.StatusNoContent)
+	// Шаг 4. Получаем ID всех постов пользователя
+	var postIDs []int
+	err = tx.NewSelect().Column("id").
+		Model((*model.Post)(nil)).
+		Where("user_id = ?", userID).
+		Scan(ctx, &postIDs)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка получения постов пользователя"})
+	}
+
+	if len(postIDs) > 0 {
+		// Удаляем данные, связанные с постами пользователя, из связанных таблиц
+		relatedTables := []struct {
+			model interface{}
+			query string
+		}{
+			{&model.PostLike{}, "post_id IN (?)"},
+			{&model.Comment{}, "post_id IN (?)"},
+			{&model.Repost{}, "original_post_id IN (?)"},
+			{&model.PostTag{}, "post_id IN (?)"},
+			{&model.Media{}, "post_id IN (?)"},
+		}
+		for _, table := range relatedTables {
+			if _, err = tx.NewDelete().Model(table.model).Where(table.query, bun.In(postIDs)).Exec(ctx); err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]string{
+					"error": fmt.Sprintf("Ошибка удаления из таблицы %T: %v", table.model, err),
+				})
+			}
+		}
+		// Удаляем посты пользователя
+		if _, err = tx.NewDelete().Model((*model.Post)(nil)).Where("user_id = ?", userID).Exec(ctx); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка удаления постов пользователя"})
+		}
+	}
+
+	// Шаг 5. Удаляем самого пользователя
+	if _, err = tx.NewDelete().Model((*model.User)(nil)).Where("id = ?", userID).Exec(ctx); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка удаления пользователя"})
+	}
+
+	// Фиксируем транзакцию
+	if err = tx.Commit(); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Ошибка фиксации транзакции"})
+	}
+
+	return c.NoContent(http.StatusNoContent)
 }
